@@ -1,0 +1,151 @@
+---
+title: "Vaccination status and serological investigation of some viral and bacterial diseases in small-scale chicken farms in the Mekong Delta region of Vietnam"
+csl: the-american-naturalist.csl
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: yes
+<!-- bibliography: references.bib -->
+editor_options: 
+  chunk_output_type: console
+---
+
+<!--
+IMAGES:
+Insert them with: ![alt text](image.png)
+You can also resize them if needed: convert image.png -resize 50% image.png
+If you want to center the image, go through HTML code:
+<div style="text-align:center"><img src ="image.png"/></div>
+
+REFERENCES:
+For references: Put all the bibTeX references in the file "references.bib"
+in the current folder and cite the references as @key or [@key] in the text.
+Uncomment the bibliography field in the above header and put a "References"
+title wherever you want to display the reference list.
+-->
+
+<style type="text/css">
+.main-container {
+  max-width: 1370px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r general options, include = FALSE}
+knitr::knit_hooks$set(
+  margin = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  prompt = function(before, options, envir) {
+    options(prompt = if (options$engine %in% c("sh", "bash")) "$ " else "> ")
+  })
+
+knitr::opts_chunk$set(margin = TRUE, prompt = TRUE, comment = "",
+                      collapse = TRUE, cache = FALSE, autodep = TRUE,
+                      dev.args = list(pointsize = 11), fig.height = 3.5,
+                      fig.width = 4.24725, fig.retina = 2, fig.align = "center")
+
+options(width = 137)
+```
+
+Packages:
+
+```{r message = FALSE}
+library(dplyr)
+library(purrr)
+library(magrittr)
+library(tidyr)
+```
+
+Reading the data:
+
+```{r}
+(data <- readr::read_csv("Figure1.csv") %>% 
+  select(-CODE) %>% 
+  group_by(FlockID, WEEKNO) %>% 
+  summarise_all(sum) %>% 
+  ungroup())
+```
+
+Checking that there are no missing weeks:
+
+```{r}
+sel <- data %>% 
+  arrange(WEEKNO) %>% 
+  group_by(FlockID) %>% 
+  summarise(x = length(unique(diff(WEEKNO)))) %>% 
+  filter(x > 1) %>% 
+  purrr::pluck("FlockID")
+
+data %>% 
+  filter(FlockID %in% sel)
+```
+
+Prepare the data:
+
+```{r}
+tmp <- data %>% 
+  group_by(FlockID) %>% 
+  tally() %>% 
+  arrange(desc(n))
+```
+
+The code below draws the figure, directely to a A4 PDF file:
+
+```{r eval = FALSE}
+# opening an A4 PDF file:
+pdf("figure.pdf", width = 8, height = 11.7)
+
+# tuning some graphical parameters:
+opar <- par(plt = c(.1, .95, .05, 1))
+
+# plotting the weeks:
+a <- table(tmp$n)
+b <- rev(cumsum(rev(a)))
+x <- as.integer(names(b)) + .5
+plot(x, b, type = "h", xlim = c(0, max(x)), ann = FALSE, axes = FALSE)
+axis(1, line = -1)
+mtext("farm", 2, -1)
+mtext("week", 1, .5)
+x_rev <- rev(x)
+x2 <- rep(x_rev, c(2, diff(rev(b))))
+y <- 0:nrow(tmp)
+segments(.5, y, x2, y)
+x3 <- .5:(min(x) - 1)
+segments(x3, 0, x3, max(b))
+
+# adding vaccination information:
+coords <- seq(.15, .85, le = 6)
+vaccines <- grep("vaccinated", names(data), value = TRUE)
+cols <- setNames(c("#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "#ff7f00", "#ffff33"), vaccines)
+data %>%
+  filter(select(., ends_with("vaccinated")) %>% rowSums() %>% as.logical) %>% 
+  mutate(Fowl.Pox.vaccinated = Fowl.Pox.vaccinated * coords[1],
+         HPAI.vaccinated     = HPAI.vaccinated     * coords[2],
+         NDV.vaccinated      = NDV.vaccinated      * coords[3],
+         IBV.vaccinated      = IBV.vaccinated      * coords[4],
+         IBD.vaccinated      = IBD.vaccinated      * coords[5],
+         PM.vaccinated       = PM.vaccinated       * coords[6],
+         y_val               = setNames(seq_len(nrow(tmp)) - .5, tmp$FlockID)[FlockID]) %>% 
+  mutate_at(vars(ends_with("vaccinated")), funs(`*`(. > 0, `+`(WEEKNO, .)))) %>% 
+  pivot_longer(cols = ends_with("vaccinated"), names_to = "vaccine", values_to = "x_val") %>% 
+  mutate(col = cols[vaccine]) %>%
+  filter(x_val > 0) %$% 
+  points(x_val - .5, y_val, pch = 15, col = col, cex = .5)
+
+# adding the legend:
+legend("right", legend = sub("\\.", " ", sub(".vaccinated", "", vaccines)),
+       fill = cols, bty = "n", title = "Vaccines:")
+
+# closing the PDf file:
+dev.off()
+
+# setting graphical parameters back to their initial values
+par(opar)
+```
+
+

@@ -1,0 +1,672 @@
+---
+title: "Effects of vaccinations on seropositivity and symptoms prevalences"
+csl: the-american-naturalist.csl
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: yes
+<!-- bibliography: references.bib -->
+editor_options: 
+  chunk_output_type: console
+---
+
+<!--
+IMAGES:
+Insert them with: ![alt text](image.png)
+You can also resize them if needed: convert image.png -resize 50% image.png
+If you want to center the image, go through HTML code:
+<div style="text-align:center"><img src ="image.png"/></div>
+
+REFERENCES:
+For references: Put all the bibTeX references in the file "references.bib"
+in the current folder and cite the references as @key or [@key] in the text.
+Uncomment the bibliography field in the above header and put a "References"
+title wherever you want to display the reference list.
+-->
+
+<style type="text/css">
+.main-container {
+  max-width: 1370px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r general options, include = FALSE}
+knitr::knit_hooks$set(
+  margin = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  prompt = function(before, options, envir) {
+    options(prompt = if (options$engine %in% c("sh", "bash")) "$ " else "> ")
+  })
+
+knitr::opts_chunk$set(margin = TRUE, prompt = TRUE, comment = "",
+                      collapse = TRUE, cache = TRUE, autodep = TRUE,
+                      dev.args = list(pointsize = 11), fig.height = 3.5,
+                      fig.width = 4.24725, fig.retina = 2, fig.align = "center")
+
+options(width = 137)
+```
+
+```{r loading_functions, include = FALSE}
+library <- function(...) base::library(..., warn.conflicts = FALSE, quiet = TRUE)
+require <- function(...) base::require(..., warn.conflicts = FALSE, quiet = TRUE)
+```
+
+<!--
+From Juan:
+
+The first thing we asked you to help us on calculating the hazard rate for each
+disease among unvaccinated flocks (regardless of vaccine use). You only need age,
+and serological result (positive and negative). This will help us rank the
+diseases by their observed circulation level.
+
+The next analyses is to build models with disease as outcome and vaccination as
+a covariate (to see whether vaccination reduces probability of clinical disease).
+
+Other model should look at titres as outcome and investigate whether the symptoms
+typical of each disease are associated with a higher titre. This would confirm
+disease circulation.
+-->
+
+## Summary
+
+Here we first look at the relationship between vaccination and seroprevalence.
+Out of the 8 pathogens for which we have serological data, 5 have vaccination.
+None of these 5 pathogens showed a significant effect of vaccination on the
+seroprevalence. The analysis was done by correcting for the age of the chicken
+that tested for serology. Then, for the 8 pathogens, we characterized the trend
+in seroprevalence as a function of age. 6 did not show any significant trend as
+a function of age. Seroprevalence was significantly increasing with age for IBV
+and MG only.
+
+In a second analysis we look at the relationship between vaccination and the
+prevalence of symptoms of respiratory infections, diarrhoea, CNS infections and
+sudden death. The prevalences of these 4 symptoms significantly decrease with
+age. The effect of the 6 vaccines on these four symptoms are somewhat puzzling
+in the sense that some vaccines do not have any effect on the symptoms that they
+are supposed to decrease. In some situations, they even increase them instead of
+decreasing them! Furthermore, other vaccines that are not supposed to have any
+effect on some symptoms do significantly increase and decrease them. This
+suggests either that the correspondance between the symptoms and the pathogens
+that are targetted is way too loose in this system or that there are other 
+factors at play that we didn't take into account into our analysis (e.g. AMU).
+The summary of the effects is detailed below:
+
+* **respiratory infections:** NDV and IBD significantly decrease the prevalence
+of symptoms of respiratory infections as we could expect (although not so much)
+but HPASI and IBV vaccine on the contrary significanlty increase the prevalence
+of symptols of respiratory infections. Furthermore, FP and PM which are not
+supposed to have any effect on the prevalence of respiratory infections
+significantly increase the prevalence of symptoms of respiratory infections.
+
+* **sudden death:** HPAI significantly decrease the prevalence of sudden death
+as we could explect but NDV and PM fail in doing so. Surprisingly, FP decreases
+the prevalence of sudden death whereas IBV, on the contrary, increases it.
+
+* **diarrhoea:** IBD decreases the prevalence of diarrhoea as expected and is
+the vaccine that does so the most. Surprisingly, IBV and PM also decrease the
+prevalence of diarrhoea but to a lesser extent than IBD. Still surprinsingly, 
+HPAI increases the prevalence of diarrhoea.
+
+* **CNS infections:** NDV increases the prevalence of CNS a lot whereas it's
+supposed to decrease it on the contrary. PM also increases the prevalence of CNS
+whereas it's not supposed to have an effect. Surprisingly, IBV decreases the
+prevalence of CNS whereas it's not supposed to have any effect on CNS.
+
+## Packages
+
+The required packages:
+
+```{r}
+required_packages <- c("dplyr", "magrittr", "purrr", "readr", "readxl", "tibble")
+to_install <- setdiff(required_packages, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install)
+```
+
+Laoding the packages for interactive use:
+
+```{r}
+library(magrittr)
+```
+
+## Loading and exploring the serological data
+
+Let's load and transform the data
+
+```{r}
+serodata <- readxl::read_excel("SeroData.xlsx") %>% 
+  dplyr::mutate_at("Weight.Kg.", as.numeric) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::starts_with("Sero")), as.logical) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::ends_with("vaccinated")), as.logical) %>% 
+  dplyr::rename(age = `Age(Week)`)
+```
+
+Number of observations:
+
+```{r}
+nrow(serodata)
+```
+
+Number of unique flocks:
+
+```{r}
+length(unique(serodata$FlockID))
+```
+
+(i.e. one observation per flock). Number of farms:
+
+```{r}
+length(unique(serodata$`Farm ID`))
+```
+
+Number of flocks per farm:
+
+```{r}
+serodata %>% 
+  dplyr::group_by(`Farm ID`) %>% 
+  dplyr::tally() %>% 
+  purrr::pluck("n") %>% 
+  table()
+```
+
+Ages:
+
+```{r}
+hist(serodata$age, col = "grey", main = NA, xlab = "age (weeks)", ylab = "number of chicken")
+```
+
+Weights:
+
+```{r}
+hist(serodata$Weight.Kg., col = "grey", main = NA, xlab = "weight (kg)", ylab = "number of chicken")
+```
+
+No correlation between age and weight:
+
+```{r}
+summary(lm(Weight.Kg. ~ age, serodata))
+```
+
+Visually:
+
+```{r}
+with(serodata, plot(age, Weight.Kg., xlab = "age (weeks)", ylab = "weight (kg)"))
+```
+
+Flock sizes:
+
+```{r}
+hist(serodata$Farmsize, col = "grey", xlab = "farm size (nb of chickens)", ylab = "number of chicken")
+```
+
+No correlation between farm size and weight:
+
+```{r}
+summary(lm(Weight.Kg. ~ Farmsize, serodata))
+with(serodata, plot(Farmsize, Weight.Kg., xlab = "farm size (nb of chickens)", ylab = "weight (kg)"))
+```
+
+But age seems to increase with farm size:
+
+```{r}
+summary(lm(age ~ Farmsize, serodata))
+```
+
+Visually:
+
+```{r}
+mod <- loess(age ~ Farmsize, serodata)
+x_val <- with(serodata, seq(min(Farmsize), max(Farmsize), le = 512))
+pred <- predict(mod, data.frame(Farmsize = x_val), se = TRUE)
+y_val <- with(pred, c(fit + qt(.025, Inf) * se.fit, rev(fit + qt(.975, Inf) * se.fit)))
+with(serodata, plot(Farmsize, age, xlab = "farm size (nb of chickens)",
+                    ylab = "age (weeks)",
+                    ylim = c(min(c(age, y_val)), max(c(age, y_val)))))
+polygon(c(x_val, rev(x_val)), y_val, col = adjustcolor("blue", .1), border = NA)
+lines(x_val, pred$fit, col = "blue")
+```
+
+## Effect of vaccinations on seroprevalence against pathogens
+
+### Making the data
+
+The following function makes a data frame for a given disease `var`, with 3
+columns: `age`, `seropositive` and `vaccinated`:
+
+```{r}
+make_data <- function(var) {
+  a <- dplyr::select(serodata, age, dplyr::contains(var))
+  sel <- grep("vaccinated", names(a))
+  if (length(sel) > 0) {
+    setNames(a, c("age", "seropositive", "vaccinated"))
+  }
+  dplyr::mutate(a, vaccinated = FALSE) %>% 
+    setNames(c("age", "seropositive", "vaccinated"))
+}
+```
+
+The 8 pathogens:
+
+```{r}
+(vars <- sub("Sero.", "", grep("Sero", names(serodata), value = TRUE)))
+```
+
+Making the data sets for all the pathogens:
+
+```{r}
+datasets <- setNames(lapply(vars, make_data), vars)
+```
+
+Checking which pathogens have vaccination:
+
+```{r}
+(vaccinated <- datasets %>% 
+  sapply(function(x) length(unique(unlist(x[, "vaccinated"]))) > 1))
+```
+
+### Modeling the data
+
+Methods: for the 5 pathogens for which we have both serological and vaccination
+data we use a logistic regression the look at the effect of age, vaccination
+status and interaction on the seroprevalence. Since none of these models show a
+significant effect of vaccination status, we then use logistic regressions to
+look at the effects of age on seroprevalence of the 8 pathogens. Only 2 (IBV and
+MG) show a significant increase of seroprevalence as a function of age with
+levels close to zero at hatching. Only for these two we perform extrapolation
+over the whole life time of the chicken. For the 6 other pathogen for which
+seroprevalence does not depend on age we don't do interpolation over the age
+range for which we have data since we have no clue to know whether the oberved
+level of seroprevalence is reach after a quick increased from zero or was
+already as such at hatching.
+
+The models:
+
+```{r}
+models <- lapply(datasets[vaccinated], function(x) glm(seropositive ~ age * vaccinated, binomial, x))
+```
+
+The coefficients estimations:
+
+```{r}
+sapply(models, coef)
+```
+
+The significativities of age and vaccination on seropositivity against the 5
+pathogens against which there is a vaccine:
+
+```{r}
+models %>%
+  sapply(function(x) anova(x, test = "LRT")$`Pr(>Chi)`) %>%
+  `[`(-1, ) %>%
+  `rownames<-`(c("age", "vaccinated", "age:vaccinated"))
+```
+
+The only disease for which vaccination may have a slight effect is PM, but, not
+only the effect of vaccination would be small, it wouldn't even be in the right
+directions...
+
+```{r}
+predict2 <- function(x) {
+  require(magrittr)
+  linkinv <- family(x)$linkinv
+  ages <- x$data$age
+  age_val <- seq(min(ages), max(ages), le = 512)
+  predict(x, data.frame(age = age_val), se.fit = TRUE) %>% 
+    data.frame() %>% 
+    dplyr::mutate(lower = linkinv(fit + qt(.025, Inf) * se.fit),
+                  upper = linkinv(fit + qt(.975, Inf) * se.fit),
+                  fit   = linkinv(fit),
+                  age   = age_val) %>% 
+    dplyr::select(-residual.scale, -se.fit)
+}
+```
+
+Let's now focus on the effect of age on seroprevalence for all the pathogens:
+
+```{r}
+models <- lapply(datasets, function(x) glm(seropositive ~ age, binomial, x))
+```
+
+Let's compute additional data for predictions:
+
+```{r}
+linkinv <- family(models[[1]])$linkinv
+age_val1 <- seq(min(serodata$age), max(serodata$age), le = 512)
+age_val2 <- seq(0, min(serodata$age), le = 512)
+age_val3 <- range(serodata$age)
+newdata1 <- data.frame(age = age_val1)
+newdata2 <- data.frame(age = age_val2)
+age_pol1 <- c(age_val1, rev(age_val1))
+age_pol2 <- c(age_val2, rev(age_val2))
+age_pol3 <- c(age_val3, rev(age_val3))
+```
+
+The following function uses a model as an input and computes a data frame with
+512 rows and 4 columns: one for age, one for predicted seroprevalence and the
+last two for the lower and upper bounds of the confidence interval:
+
+```{r}
+predict2 <- function(x, newdata) {
+  require(magrittr)
+  predict(x, newdata, se.fit = TRUE) %>% 
+    data.frame() %>% 
+    dplyr::mutate(lower = linkinv(fit + qt(.025, Inf) * se.fit),
+                  upper = linkinv(fit + qt(.975, Inf) * se.fit),
+                  fit   = linkinv(fit)) %>% 
+    dplyr::select(-residual.scale, -se.fit)
+}
+```
+
+This function does the same as `predict2()` but in case there is no significant
+relationship with age:
+
+```{r}
+constant <- function(x) {
+  with(with(x,
+            binom.test(sum(seropositive), length(seropositive))),
+       c(estimate, conf.int))
+}
+```
+
+Let's look at the significativities of the age effects:
+
+```{r}
+sapply(models, function(x) coef(summary(x))[2, "Pr(>|z|)"])
+```
+
+Age effect on PM after correction for multiple testing does not even remain
+significant:
+
+```{r}
+length(models) * sapply(models, function(x) coef(summary(x))[2, "Pr(>|z|)"])
+```
+
+Identifying the pathogens for which seroprevalence significantly increases with
+age:
+
+```{r}
+(ages_signif <- sapply(models, function(x) coef(summary(x))[2, "Pr(>|z|)"]) < .05 / length(models))
+```
+
+Computing the models predictions, interpolation for the models where age effect
+is significant:
+
+```{r}
+predictions1 <- lapply(models, predict2, newdata1)
+```
+
+Extrapolation for the models where age effect is significant:
+
+```{r}
+predictions2 <- lapply(models, predict2, newdata2)
+```
+
+Interpolation for the models where the age effect is not significant:
+
+```{r}
+predictions3 <- lapply(datasets, constant)
+```
+
+This function plots the model predictions in case the age effect is significant:
+
+```{r}
+plot_pred1 <- function(x, y) {
+  plot(age_val1, x$fit, xlim = c(0, 25), ylim = 0:1, type = "n",
+       xlab = "age (weeks)", ylab = "seroprevalence")
+  polygon(age_pol1, c(x$lower, rev(x$upper)), col = adjustcolor("blue", .2), border = NA)
+  lines(age_val1, x$fit, col = "blue")
+  lines(age_val1, x$lower, col = adjustcolor("blue", .2))
+  lines(age_val1, x$upper, col = adjustcolor("blue", .2))
+  polygon(age_pol2, c(y$lower, rev(y$upper)), 30, 135, NA, col = adjustcolor("blue", .2))
+  lines(age_val2, y$lower, col = adjustcolor("blue", .2))
+  lines(age_val2, y$upper, col = adjustcolor("blue", .2))
+  lines(age_val2, y$fit, col = "blue", lty = 2)
+}
+```
+
+where `x` and `y` are the interpolation and extrapolation predictions
+respectively. The following function plots the model interpolation predictions
+in case the age effect is not significant:
+
+```{r}
+plot_pred2 <- function(x) {
+  plot(age_val3, rep(x[1], 2), xlim = c(0, 25), ylim = 0:1,
+       type = "n", xlab = "age (weeks)", ylab = "seroprevalence")
+  polygon(age_pol3, x[c(2, 2, 3, 3)], col = adjustcolor("blue", .2), border = NA)
+  lines(age_val3, rep(x[1], 2), col = "blue")
+  lines(age_val3, rep(x[2], 2), col = adjustcolor("blue", .2))
+  lines(age_val3, rep(x[3], 2), col = adjustcolor("blue", .2))
+}
+```
+
+Plotting the models' predictions:
+
+```{r fig.height = 4, fig.width = 9}
+opar <- par(mfrow = c(2, 4), cex = .83, plt = c(.2, .85, .2, .85))
+for (i in seq_along(vars)) {
+  if (ages_signif[i]) plot_pred1(predictions1[[i]], predictions2[[i]])
+  else plot_pred2(predictions3[[i]])
+  mtext(vars[i], line = 0)
+}
+par(opar)
+```
+
+where the areas represent the 95% confidence interval (for extrapolation when
+hatched and for interpolation when full color). Extrapolations are shown only in
+cases where age effect is significant. Indeed, when age effect is not
+significant we have not much clue to know whether the level plateau corresponds
+to a level that has been reached after an icreased for which we don't have data
+or to a level that was constant since hatching.
+
+## Effect of vaccinations on symptoms prevalences
+
+### Making the data
+
+Loading the ViParc data for the week and the symptoms information:
+
+```{r}
+viparc <- readr::read_csv("https://raw.githubusercontent.com/viparc/clires_data/master/data/viparc.csv",
+                          col_types = paste(c("ciillidddllllll", rep("d", 45)), collapse = "")) %>% 
+  dplyr::mutate(FlockID = paste0(farm, flock))
+```
+
+Laoding the data on the timings of vaccination:
+
+```{r}
+fig1 <- readr::read_csv("Figure1.csv", col_types = "cdddddddc") %>% 
+  dplyr::select(-CODE) %>%
+  dplyr::mutate_if(is.numeric, as.integer) %>% 
+  dplyr::arrange(WEEKNO)
+```
+
+The following function splits the information on a given vaccine by flock:
+
+```{r}
+g <- function(vacc_name) {
+  fig1[, c("FlockID", "WEEKNO", vacc_name)] %>% 
+  unique() %>% 
+  split(.$FlockID)
+}
+```
+
+The following function recodes, for a data frame containing the vaccination
+information of a given flock, the vaccination information with `FALSE` for the
+weeks before vaccination and `TRUE` for the weeks after vaccination:
+
+```{r}
+f <- function(df) {
+  vacc_names <- grep("vaccinated", names(df))
+  out <- setNames(data.frame(df$FlockID[1], seq_len(max(df$WEEKNO)), 0L, stringsAsFactors = FALSE), names(df))
+  first <- which(df[, vacc_names] > 0)[1]
+  if (is.na(first)) return(out)
+  out[first:nrow(out), vacc_names] <- 1L
+  out
+}
+```
+
+Using the 2 datasets and the 2 functions defined above to generate the dataset
+for our analysis:
+
+```{r}
+(vacc_data <- names(fig1) %>%
+  setdiff(c("FlockID", "WEEKNO")) %>% 
+  lapply(g) %>% 
+  lapply(function(x) dplyr::bind_rows(lapply(x, f))) %>% 
+  purrr::reduce(dplyr::left_join, c("FlockID", "WEEKNO")) %>% 
+  dplyr::left_join(viparc, "FlockID") %>% 
+  dplyr::select(farm, flock, week, respiratory, diarrhoea, cns, sudden_death, ends_with("vaccinated")) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::ends_with("vaccinated")), as.logical) %>% 
+  tibble::as_tibble())
+```
+
+### Modeling the data
+
+Methods: here we combine two data sets for the analysis: The first one gives the
+timings of vaccination and the second one give the presence of symptoms. The
+timing information is transformed into a boolean vector that says, for each week
+of each flock, whether we are before or after vaccination against a particular
+pathogen. Then, we use logistic regression to model, for each symptom of
+interest, the effect of being before or after vaccination for all the vaccines,
+as well age. The results show that, in absence of vaccination, the prevalences
+of symptoms significantly decrease with age. When accounting for this age
+effect, as well as correcting for multiple tests, there are a number of
+vaccination effects that are significant but not always in a way that is
+expected. This is detailed below and in the summary at the top of this document.
+
+Estimating logistic regressions, one for each of the 4 symptoms:
+
+```{r}
+vaccine_names <- grep("vaccinated", names(vacc_data), value = TRUE)
+symptoms <- c("respiratory", "sudden_death", "diarrhoea", "cns")
+models <- setNames(lapply(
+  paste(symptoms, "~", paste(c("week", vaccine_names), collapse = "+")),
+  function(x) glm(as.formula(x), binomial, vacc_data)), symptoms)
+```
+
+The coefficients of the 4 models:
+
+```{r}
+(coeff <- sapply(models, coef))
+```
+
+The confidence intervals of the coefficients of the 4 models:
+
+```{r}
+coeff_ci <- lapply(models, confint)
+```
+
+The significativities of the effects for the 4 models, corrected for potential
+confounding effects:
+
+```{r}
+models %>%
+  sapply(function(x) car::Anova(x, test = "LR")$`Pr(>Chisq)`) %>%
+  round(4) %>% 
+  `rownames<-`(rownames(coeff)[-1])
+```
+
+Correcting for multiple tests:
+
+```{r}
+models %>%
+  sapply(function(x) car::Anova(x, test = "LR")$`Pr(>Chisq)`) %>%
+  round(4) %>% 
+  `rownames<-`(rownames(coeff)[-1]) %>% 
+  `*`(length(.))
+```
+
+
+The link inverse function of the models:
+
+```{r}
+linkinv <- family(models[[1]])$linkinv
+```
+
+Generating some new data for the models predictions:
+
+```{r}
+newdata <- data.frame(week = seq(min(vacc_data$week), max(vacc_data$week), le = 512),
+                      Fowl.Pox.vaccinated = FALSE, HPAI.vaccinated = FALSE,
+                      NDV.vaccinated = FALSE, IBV.vaccinated = FALSE,
+                      IBD.vaccinated = FALSE, PM.vaccinated = FALSE)
+```
+
+The following function takes a model as an input and returns a data frame with
+3 columns: predicted value and the lower and upper bounds of the confidence
+interval of the predictions:
+
+```{r}
+predict2 <- function(x) {
+  require(magrittr)
+  predict(x, newdata, se.fit = TRUE) %>% 
+    data.frame() %>% 
+    tibble::as_tibble() %>% 
+    dplyr::mutate(lower = linkinv(fit + qt(.025, Inf) * se.fit),
+                  upper = linkinv(fit + qt(.975, Inf) * se.fit),
+                  fit   = linkinv(fit)) %>% 
+    dplyr::select(-residual.scale, -se.fit)
+}
+```
+
+Generating the models' predictions:
+
+```{r}
+predictions <- lapply(models, predict2)
+```
+
+Reformatting the diseases names:
+
+```{r}
+leg <- names(predictions) %>% 
+  sub("_", " ", .) %>% 
+  sub("cns", "CNS infections", .) %>% 
+  sub("y", "y infections", .)
+```
+
+The prevalences of the diseases as functions of age:
+
+```{r}
+cols <- c("#e41a1c", "#377eb8", "#4daf4a", "#984ea3")
+fills <- adjustcolor(cols, .2)
+x <- newdata$week
+x_val <- c(x, rev(x))
+plot(x, predictions[[1]]$fit, ylim = c(0,.17), type = "n", xlab = "age (weeks)",
+     ylab = "average prevalence")
+for (i in seq_along(predictions)) {
+  polygon(x_val, c(predictions[[i]]$lower, rev(predictions[[i]]$upper)), 
+          col = fills[i], border = NA)
+  lines(x, predictions[[i]]$fit, col = cols[i])
+}
+legend("topright", legend = leg, fill = fills, col = cols, lty = 1, bty = "n", border = NA)
+```
+
+The effects of the vaccines on the prevalences of the diseases:
+
+```{r fig.height = 2, fig.width = 10}
+xs <- 1:6
+ys <- c(1 / seq(0, 10, 1), 1 + seq(0, 10, 1))
+f <- function(x) log2(exp(x))
+
+opar <- par(mfrow = c(1, 4), plt = c(.2, 1, .05, .95))
+
+for (i in seq_along(coeff_ci)) {
+  plot(xs, f(coeff[-(1:2), i]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1),
+       axes = FALSE, xlab = NA, ylab = "odds ratio")
+  axis(2, log2(ys), ys)
+  text(3.5, 2.5, leg[i])
+#  text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+  text(xs, -2.5, c("FP", "HPAI", "NDV", "IBV", "IBD", "PM"))
+  arrows(xs, f(coeff_ci[[i]][-(1:2), 1]), xs, f(coeff_ci[[i]][-(1:2), 2]), .05, 90, 3)
+  abline(h = 0, lty = 2)
+}
+par(opar)
+```
+
+Note that all those for which the confidence interval touchs the 1 line are not
+significant after correction for multiple tests. All the other ones are
+significant.

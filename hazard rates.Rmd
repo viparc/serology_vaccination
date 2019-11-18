@@ -8,6 +8,8 @@ output:
   pdf_document:
     toc: yes
 <!-- bibliography: references.bib -->
+editor_options: 
+  chunk_output_type: console
 ---
 
 <!--
@@ -54,5 +56,348 @@ options(width = 137)
 library <- function(...) base::library(..., warn.conflicts = FALSE, quiet = TRUE)
 require <- function(...) base::require(..., warn.conflicts = FALSE, quiet = TRUE)
 ```
+
+From Juan:
+
+The first thing we asked you to help us on calculating the hazard rate for each
+disease among unvaccinated flocks (regardless of vaccine use). You only need age,
+and serological result (positive and negative). This will help us rank the
+diseases by their observed circulation level.
+
+The next analyses is to build models with disease as outcome and vaccination as
+a covariate (to see whether vaccination reduces probability of clinical disease).
+
+Other model should look at titres as outcome and investigate whether the symptoms
+typical of each disease are associated with a higher titre. This would confirm
+disease circulation.
+
+## Packages
+
+The required packages:
+
+```{r}
+required_packages <- c("dplyr", "magrittr", "purrr", "readxl")
+to_install <- setdiff(required_packages, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install)
+```
+
+Laoding the packages for interactive use:
+
+```{r}
+library(magrittr)
+```
+
+## Loading the data
+
+Let's load and transform the data
+
+```{r}
+serodata <- readxl::read_excel("SeroData.xlsx") %>% 
+  dplyr::mutate_at("Weight.Kg.", as.numeric) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::starts_with("Sero")), as.logical) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::ends_with("vaccinated")), as.logical) %>% 
+  dplyr::rename(age = `Age(Week)`)
+```
+
+Number of observations:
+
+```{r}
+nrow(serodata)
+```
+
+Number of unique flocks:
+
+```{r}
+length(unique(serodata$FlockID))
+```
+
+(i.e. one observation per flock). Number of farms:
+
+```{r}
+length(unique(serodata$`Farm ID`))
+```
+
+Number of flocks per farm:
+
+```{r}
+serodata %>% 
+  dplyr::group_by(`Farm ID`) %>% 
+  dplyr::tally() %>% 
+  purrr::pluck("n") %>% 
+  table()
+```
+
+Ages:
+
+```{r}
+hist(serodata$age, col = "grey", main = NA, xlab = "age (weeks)", ylab = "number of chicken")
+```
+
+Weights:
+
+```{r}
+hist(serodata$Weight.Kg., col = "grey", main = NA, xlab = "weight (kg)", ylab = "number of chicken")
+```
+
+No correlation between age and weight:
+
+```{r}
+summary(lm(Weight.Kg. ~ age, serodata))
+```
+
+Visually:
+
+```{r}
+with(serodata, plot(age, Weight.Kg., xlab = "age (weeks)", ylab = "weight (kg)"))
+```
+
+Flock sizes:
+
+```{r}
+hist(serodata$Farmsize, col = "grey", xlab = "farm size (nb of chickens)", ylab = "number of chicken")
+```
+
+No correlation between farm size and weight:
+
+```{r}
+summary(lm(Weight.Kg. ~ Farmsize, serodata))
+with(serodata, plot(Farmsize, Weight.Kg., xlab = "farm size (nb of chickens)", ylab = "weight (kg)"))
+```
+
+But age seems to increase with farm size:
+
+```{r}
+summary(lm(age ~ Farmsize, serodata))
+```
+
+Visually:
+
+```{r}
+mod <- loess(age ~ Farmsize, serodata)
+x_val <- with(serodata, seq(min(Farmsize), max(Farmsize), le = 512))
+pred <- predict(mod, data.frame(Farmsize = x_val), se = TRUE)
+y_val <- with(pred, c(fit + qt(.025, Inf) * se.fit, rev(fit + qt(.975, Inf) * se.fit)))
+with(serodata, plot(Farmsize, age, xlab = "farm size (nb of chickens)",
+                    ylab = "age (weeks)",
+                    ylim = c(min(c(age, y_val)), max(c(age, y_val)))))
+polygon(c(x_val, rev(x_val)), y_val, col = adjustcolor("blue", .1), border = NA)
+lines(x_val, pred$fit, col = "blue")
+```
+
+## Exploring seroprevalence as a function of age (non-vaccinated)
+
+The following function makes a data frame for the disease `var`, with one column
+containing the age of the chicken and the other column containing the serological
+status (boolean):
+
+```{r include = FALSE}
+make_data <- function(var) {
+  a <- dplyr::select(serodata, age, dplyr::contains(var))
+  sel <- grep("vaccinated", names(a))
+  if (length(sel) > 0) return(a[! unlist(a[, sel]), -sel])
+  a
+}
+```
+
+```{r}
+make_data <- function(var) {
+  a <- dplyr::select(serodata, age, dplyr::contains(var))
+  sel <- grep("vaccinated", names(a))
+  if (length(sel) > 0) {
+    col_names <- names(a)
+    col_names[sel] <- "vaccinated"
+    names(a) <- col_names
+    return(a)
+  }
+  dplyr::mutate(a, vaccinated = FALSE)
+}
+```
+
+The following function cuts the numeric vector `x` in `n` categories, each of
+roughly an equal number of observations:
+
+```{r}
+cut2 <- function(x, n) {
+  cut(x, quantile(x, seq(0, 1, le = n + 1)), include.lowest = TRUE)
+}
+```
+
+The following funtion estimate the proportion of `TRUE` in the boolean vector
+`x`, with confidence interval:
+
+```{r}
+binomtest <- function(x) {
+  sero <- unlist(x[, grep("Sero", names(x))])
+  test <- binom.test(sum(sero), length(sero))
+  setNames(data.frame(matrix(unlist(test[c("estimate", "conf.int")]), 1)),
+           c("estimate", "lower", "upper"))
+}
+```
+
+The following function computes the mean in a data frame where one of its columns
+is named `age`. It returns the output as a data frame.
+
+```{r}
+mean_age <- function(x) data.frame(age = mean(unlist(x$age)))
+```
+
+The following function computes, for a disease `var`, a data frame that contains
+age class, mean age in this age class, estimated proportion of seroprotected with
+confidence interval (with one column for lower bound and one column for upper
+bound). The rows correspond to age classes and the number of these age classes
+is `n`.
+
+```{r}
+#seroage <- function(var, n = 4) {
+seroage2 <- function(a, n = 4) {
+  require(magrittr)
+#  a <- make_data(var)
+  b <- split(a, cut2(a$age, n))
+  x <- lapply(b, binomtest) %>% 
+    dplyr::bind_rows(.id = "age_group")
+  y <- lapply(b, mean_age) %>% 
+    dplyr::bind_rows(.id = "age_group")
+  dplyr::left_join(y, x, "age_group")
+}
+```
+
+The following function takes the output of the function `seroage()` as an input 
+and draw the figure of the seroprevalence as a function of age, with confidence
+interval:
+
+```{r}
+make_fig <- function(df, ylim = NULL) {
+  with(df, {
+    if(is.null(ylim)) ylim <- c(min(lower), max(upper))
+    plot(age, estimate, ylim = ylim, xlab = "age (weeks)", ylab = "seroprevalence")
+    arrows(age, lower, age, upper, .1, 90, 3)
+  })
+}
+```
+
+This is the list of diseases for which we have vaccination:
+
+```{r}
+vaccvars <- c("PM", "AI", "IBV", "IBD", "NDV")
+```
+
+Let's visualize the seroprevalence for the 8 diseases (in columns, over 2 rows),
+and for different numbers of categories (5 for the first two rows, 4 for the
+next 2 and 3 for the last 2):
+
+```{r fig.height = 2, fig.width = 10, include = FALSE, eval = FALSE}
+for (n in 5:3) {
+  opar <- par(mfrow = c(1, 5), cex = .83, plt = c(.2, .85, .2, .85))
+  for (i in vars) {
+    make_fig(seroage(i, n))
+    mtext(i, line = 0)
+  }
+  par(opar)
+}
+```
+
+```{r fig.height = 4, fig.width = 8}
+vars <- sub("Sero.", "", grep("Sero", names(serodata), value = TRUE))
+for (n in 5:3) {
+  opar <- par(mfrow = c(2, 4), cex = .83, plt = c(.2, .85, .2, .85))
+    for (i in vars) {
+      make_fig(seroage(filter(make_data(i)), n))
+      mtext(i, line = 0)
+    }
+  par(opar)
+}
+```
+
+## Modelling hazard rate as a function of age
+
+The following function makes a polynomial formula:
+
+```{r}
+formula2 <- function(x, n) {
+  if (n < 1) return(formula(paste0("Sero.", x, " ~ 1")))
+  as.formula(paste0("Sero.", x, " ~ ",
+                 paste(sapply(1:n, function(x) paste0("I(age^", x, ")")), collapse = " + ")), globalenv())
+}
+```
+
+The following function run a logistic model:
+
+```{r}
+logitbinomreg <- function(x, n) {
+  glm(formula2(x, n), binomial, make_data(x))
+}
+```
+
+The following function looks for the optimal degree of the polynome:
+
+```{r}
+optimal_degree <- function(x) {
+  head(which(x$`Pr(>Chi)`[-1] > .05), 1) - 1
+}
+```
+
+The following function computes a data frame with 512 rows and 4 columns: one for
+age, one for predicted seroprevalence and the last two for the lower and upper 
+bounds of the confidence interval:
+
+```{r}
+predict2 <- function(x) {
+  require(magrittr)
+  linkinv <- family(x)$linkinv
+  ages <- x$data$age
+  age_val <- seq(min(ages), max(ages), le = 512)
+  predict(x, data.frame(age = age_val), se.fit = TRUE) %>% 
+    data.frame() %>% 
+    dplyr::mutate(lower = linkinv(fit + qt(.025, Inf) * se.fit),
+                  upper = linkinv(fit + qt(.975, Inf) * se.fit),
+                  fit   = linkinv(fit),
+                  age   = age_val) %>% 
+    dplyr::select(-residual.scale, -se.fit)
+}
+```
+
+The following function takes the output of the `predict2()` function as an input
+and draws a figure with model predicted seroprevalence as a function of age:
+
+```{r}
+plot_pred <- function(x) {
+  plot(x$age, x$fit, xlim = c(12, 24), ylim = 0:1, type = "n", xlab = "age (weeks)", ylab = "seroprevalence")
+  polygon(c(x$age, rev(x$age)), c(x$lower, rev(x$upper)), col = adjustcolor("blue", .2), border = NA)
+  lines(x$age, x$fit, col = "blue")
+}
+```
+
+Looking for optimal degrees of each model
+
+```{r}
+(opt_deg <- vars %>%
+  lapply(function(x) anova(logitbinomreg(x, 3), test = "LRT")) %>% 
+  sapply(optimal_degree))
+```
+
+Estimating the models with the optimal degrees:
+
+```{r}
+models <- purrr::map2(vars, opt_deg, logitbinomreg)
+```
+
+Computing the models predictions:
+
+```{r}
+predictions <- lapply(models, predict2)
+```
+
+Plotting the models' predictions:
+
+```{r fig.height = 4, fig.width = 8}
+opar <- par(mfrow = c(2, 4), cex = .83, plt = c(.2, .85, .2, .85))
+for (i in seq_along(vars)) {
+  plot_pred(predictions[[i]])
+  mtext(vars[i], line = 0)
+}
+par(opar)
+```
+
+
 
 

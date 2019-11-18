@@ -1,0 +1,797 @@
+---
+title: "Dynamics of seroprevalence and effect of vaccination"
+csl: the-american-naturalist.csl
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: yes
+<!-- bibliography: references.bib -->
+editor_options: 
+  chunk_output_type: console
+---
+
+<!--
+IMAGES:
+Insert them with: ![alt text](image.png)
+You can also resize them if needed: convert image.png -resize 50% image.png
+If you want to center the image, go through HTML code:
+<div style="text-align:center"><img src ="image.png"/></div>
+
+REFERENCES:
+For references: Put all the bibTeX references in the file "references.bib"
+in the current folder and cite the references as @key or [@key] in the text.
+Uncomment the bibliography field in the above header and put a "References"
+title wherever you want to display the reference list.
+-->
+
+<style type="text/css">
+.main-container {
+  max-width: 1370px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+```{r general options, include = FALSE}
+knitr::knit_hooks$set(
+  margin = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  prompt = function(before, options, envir) {
+    options(prompt = if (options$engine %in% c("sh", "bash")) "$ " else "> ")
+  })
+
+knitr::opts_chunk$set(margin = TRUE, prompt = TRUE, comment = "",
+                      collapse = TRUE, cache = TRUE, autodep = TRUE,
+                      dev.args = list(pointsize = 11), fig.height = 3.5,
+                      fig.width = 4.24725, fig.retina = 2, fig.align = "center")
+
+options(width = 137)
+```
+
+```{r loading_functions, include = FALSE}
+library <- function(...) base::library(..., warn.conflicts = FALSE, quiet = TRUE)
+require <- function(...) base::require(..., warn.conflicts = FALSE, quiet = TRUE)
+```
+
+<!--
+From Juan:
+
+The first thing we asked you to help us on calculating the hazard rate for each
+disease among unvaccinated flocks (regardless of vaccine use). You only need age,
+and serological result (positive and negative). This will help us rank the
+diseases by their observed circulation level.
+
+The next analyses is to build models with disease as outcome and vaccination as
+a covariate (to see whether vaccination reduces probability of clinical disease).
+
+Other model should look at titres as outcome and investigate whether the symptoms
+typical of each disease are associated with a higher titre. This would confirm
+disease circulation.
+-->
+
+## Packages
+
+The required packages:
+
+```{r}
+required_packages <- c("dplyr", "magrittr", "purrr", "readxl")
+to_install <- setdiff(required_packages, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install)
+```
+
+Laoding the packages for interactive use:
+
+```{r}
+library(magrittr)
+```
+
+## Loading the data
+
+Let's load and transform the data
+
+```{r}
+serodata <- readxl::read_excel("SeroData.xlsx") %>% 
+  dplyr::mutate_at("Weight.Kg.", as.numeric) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::starts_with("Sero")), as.logical) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::ends_with("vaccinated")), as.logical) %>% 
+  dplyr::rename(age = `Age(Week)`)
+```
+
+Number of observations:
+
+```{r}
+nrow(serodata)
+```
+
+Number of unique flocks:
+
+```{r}
+length(unique(serodata$FlockID))
+```
+
+(i.e. one observation per flock). Number of farms:
+
+```{r}
+length(unique(serodata$`Farm ID`))
+```
+
+Number of flocks per farm:
+
+```{r}
+serodata %>% 
+  dplyr::group_by(`Farm ID`) %>% 
+  dplyr::tally() %>% 
+  purrr::pluck("n") %>% 
+  table()
+```
+
+Ages:
+
+```{r}
+hist(serodata$age, col = "grey", main = NA, xlab = "age (weeks)", ylab = "number of chicken")
+```
+
+Weights:
+
+```{r}
+hist(serodata$Weight.Kg., col = "grey", main = NA, xlab = "weight (kg)", ylab = "number of chicken")
+```
+
+No correlation between age and weight:
+
+```{r}
+summary(lm(Weight.Kg. ~ age, serodata))
+```
+
+Visually:
+
+```{r}
+with(serodata, plot(age, Weight.Kg., xlab = "age (weeks)", ylab = "weight (kg)"))
+```
+
+Flock sizes:
+
+```{r}
+hist(serodata$Farmsize, col = "grey", xlab = "farm size (nb of chickens)", ylab = "number of chicken")
+```
+
+No correlation between farm size and weight:
+
+```{r}
+summary(lm(Weight.Kg. ~ Farmsize, serodata))
+with(serodata, plot(Farmsize, Weight.Kg., xlab = "farm size (nb of chickens)", ylab = "weight (kg)"))
+```
+
+But age seems to increase with farm size:
+
+```{r}
+summary(lm(age ~ Farmsize, serodata))
+```
+
+Visually:
+
+```{r}
+mod <- loess(age ~ Farmsize, serodata)
+x_val <- with(serodata, seq(min(Farmsize), max(Farmsize), le = 512))
+pred <- predict(mod, data.frame(Farmsize = x_val), se = TRUE)
+y_val <- with(pred, c(fit + qt(.025, Inf) * se.fit, rev(fit + qt(.975, Inf) * se.fit)))
+with(serodata, plot(Farmsize, age, xlab = "farm size (nb of chickens)",
+                    ylab = "age (weeks)",
+                    ylim = c(min(c(age, y_val)), max(c(age, y_val)))))
+polygon(c(x_val, rev(x_val)), y_val, col = adjustcolor("blue", .1), border = NA)
+lines(x_val, pred$fit, col = "blue")
+```
+
+## Modelling seropositivity as a function of age and vaccination
+
+The following function makes a data frame for a given disease `var`, with 3
+columns: `age`, `seropositive` and `vaccinated`:
+
+```{r}
+make_data <- function(var) {
+  a <- dplyr::select(serodata, age, dplyr::contains(var))
+  sel <- grep("vaccinated", names(a))
+  if (length(sel) > 0) {
+    setNames(a, c("age", "seropositive", "vaccinated"))
+  }
+  dplyr::mutate(a, vaccinated = FALSE) %>% 
+    setNames(c("age", "seropositive", "vaccinated"))
+}
+```
+
+The 8 diseases:
+
+```{r}
+vars <- sub("Sero.", "", grep("Sero", names(serodata), value = TRUE))
+```
+
+Making the data sets for all the diseases:
+
+```{r}
+datasets <- setNames(lapply(vars, make_data), vars)
+```
+
+Checking which diseases have vaccination:
+
+```{r}
+vaccinated <- datasets %>% 
+  sapply(function(x) length(unique(unlist(x[, "vaccinated"]))) > 1)
+```
+
+Looking at the effect of age and vaccination for all the diseases with vaccination:
+
+```{r}
+lapply(datasets[vaccinated], function(x)
+                               glm(seropositive ~ age * vaccinated, binomial, x) %>% 
+                               anova(test = "LRT"))
+```
+
+The only disease for which vaccination may have a slight effect is PM:
+
+```{r}
+summary(glm(seropositive ~ age + vaccinated, binomial, datasets[["PM"]]))
+```
+
+and
+
+```{r}
+summary(glm(seropositive ~ age * vaccinated, binomial, datasets[["PM"]]))
+```
+
+Not only the effect of vaccination would be small be it wouldn't even be in the
+right directions...
+
+The following function computes a data frame with 512 rows and 4 columns: one for
+age, one for predicted seroprevalence and the last two for the lower and upper 
+bounds of the confidence interval:
+
+```{r}
+predict2 <- function(x) {
+  require(magrittr)
+  linkinv <- family(x)$linkinv
+  ages <- x$data$age
+  age_val <- seq(min(ages), max(ages), le = 512)
+  predict(x, data.frame(age = age_val), se.fit = TRUE) %>% 
+    data.frame() %>% 
+    dplyr::mutate(lower = linkinv(fit + qt(.025, Inf) * se.fit),
+                  upper = linkinv(fit + qt(.975, Inf) * se.fit),
+                  fit   = linkinv(fit),
+                  age   = age_val) %>% 
+    dplyr::select(-residual.scale, -se.fit)
+}
+```
+
+The following function takes the output of the `predict2()` function as an input
+and draws a figure with model predicted seroprevalence as a function of age:
+
+```{r}
+plot_pred <- function(x) {
+  plot(x$age, x$fit, xlim = c(12, 24), ylim = 0:1, type = "n", xlab = "age (weeks)", ylab = "seroprevalence")
+  polygon(c(x$age, rev(x$age)), c(x$lower, rev(x$upper)), col = adjustcolor("blue", .2), border = NA)
+  lines(x$age, x$fit, col = "blue")
+}
+```
+
+```{r}
+models <- lapply(datasets, function(x) glm(seropositive ~ age, binomial, x))
+```
+
+Computing the models predictions:
+
+```{r}
+predictions <- lapply(models, predict2)
+```
+
+Plotting the models' predictions:
+
+```{r fig.height = 4, fig.width = 8}
+opar <- par(mfrow = c(2, 4), cex = .83, plt = c(.2, .85, .2, .85))
+for (i in seq_along(vars)) {
+  plot_pred(predictions[[i]])
+  mtext(vars[i], line = 0)
+}
+par(opar)
+```
+
+## The relationship between vaccination and diseases episodes
+
+Loading the ViParc data:
+
+```{r}
+viparc <- readr::read_csv("https://raw.githubusercontent.com/viparc/clires_data/master/data/viparc.csv",
+                          col_types = paste(rep(c("c", "i", "l", "i", "d", "l", "d"), c(1, 2, 2, 1, 3, 6, 45)), collapse = "")) %>% 
+  dplyr::mutate(FlockID = paste0(farm, flock)) %>% 
+  dplyr::semi_join(serodata, by = "FlockID") %>% 
+  dplyr::group_by(FlockID) %>% 
+  dplyr::summarise(duration    = n(),
+                   respiratory = sum(respiratory),
+                   diarrhoea   = sum(diarrhoea),
+                   cns         = sum(cns),
+                   mortality   = sum(sudden_death)) %>% 
+  dplyr::left_join(serodata, "FlockID")
+```
+
+HPAI and IBV vaccines tend to be associated with higher prevalence of
+respiratory symptoms. Is it because vaccines are responsive? NDV and IBD
+vaccines have no effects on the prevalence of respiratory symptoms.
+
+```{r}
+summary(glm(cbind(respiratory, duration - respiratory) ~ NDV.vaccinated, binomial, viparc))
+summary(glm(cbind(respiratory, duration - respiratory) ~ HPAI.vaccinated, binomial, viparc))
+summary(glm(cbind(respiratory, duration - respiratory) ~ IBV.vaccinated, binomial, viparc))
+summary(glm(cbind(respiratory, duration - respiratory) ~ IBD.vaccinated, binomial, viparc))
+summary(glm(cbind(respiratory, duration - respiratory) ~ NDV.vaccinated + HPAI.vaccinated + IBV.vaccinated + IBD.vaccinated, binomial, viparc))
+car::Anova(glm(cbind(respiratory, duration - respiratory) ~ NDV.vaccinated + HPAI.vaccinated + IBV.vaccinated + IBD.vaccinated, binomial, viparc), test = "LR")
+```
+
+NDV vaccine is marginally associated with higher prevalence of CNS. Does it
+reflect responsive vaccination? HPAI vaccine has no effect of the prevalence of
+CNS symptom.
+
+```{r}
+summary(glm(cbind(cns, duration - cns) ~ NDV.vaccinated, binomial, viparc))
+summary(glm(cbind(cns, duration - cns) ~ HPAI.vaccinated, binomial, viparc))
+summary(glm(cbind(cns, duration - cns) ~ HPAI.vaccinated + NDV.vaccinated, binomial, viparc))
+car::Anova(glm(cbind(cns, duration - cns) ~ HPAI.vaccinated + NDV.vaccinated, binomial, viparc), test = "LR")
+```
+
+Vaccine against *P. multocida* seems to protect against mortality. NDV and HPAI
+have no effect on mortality.
+
+```{r}
+summary(glm(cbind(mortality, duration - mortality) ~ HPAI.vaccinated, binomial, viparc))
+summary(glm(cbind(mortality, duration - mortality) ~ PM.vaccinated, binomial, viparc))
+summary(glm(cbind(mortality, duration - mortality) ~ NDV.vaccinated, binomial, viparc))
+summary(glm(cbind(mortality, duration - mortality) ~ NDV.vaccinated + HPAI.vaccinated + PM.vaccinated, binomial, viparc))
+car::Anova(glm(cbind(mortality, duration - mortality) ~ NDV.vaccinated + HPAI.vaccinated + PM.vaccinated, binomial, viparc), test = "LR")
+```
+
+```{r}
+a <- viparc %>% 
+  dplyr::select(duration, mortality, PM.vaccinated) %>% 
+  split(.$PM.vaccinated)
+without <- exp(coef(glm(cbind(mortality, duration - mortality) ~ 1, binomial, a[[1]])))
+without_ci <- exp(confint(glm(cbind(mortality, duration - mortality) ~ 1, binomial, a[[1]])))
+with <- exp(coef(glm(cbind(mortality, duration - mortality) ~ 1, binomial, a[[2]])))
+with_ci <- exp(confint(glm(cbind(mortality, duration - mortality) ~ 1, binomial, a[[2]])))
+plot(1:2, c(without, with), xlim = c(0, 3), ylim = c(0, .06), xlab = NA, ylab = "probability of sudden death", axes = FALSE, pch = 19)
+axis(2)
+arrows(1, without_ci[1], 1, without_ci[2], .1, 90, 3)
+arrows(2, with_ci[1], 2, with_ci[2], .1, 90, 3)
+text(1, 0, "no vaccine")
+text(2, 0, "vaccine")
+```
+
+IBD vaccine seems to protect against diarrhoea:
+
+```{r}
+summary(glm(cbind(diarrhoea, duration - diarrhoea) ~ IBD.vaccinated, binomial, viparc))
+```
+
+```{r}
+a <- viparc %>% 
+  dplyr::select(duration, diarrhoea, IBD.vaccinated) %>% 
+  split(.$IBD.vaccinated)
+without <- exp(coef(glm(cbind(diarrhoea, duration - diarrhoea) ~ 1, binomial, a[[1]])))
+without_ci <- exp(confint(glm(cbind(diarrhoea, duration - diarrhoea) ~ 1, binomial, a[[1]])))
+with <- exp(coef(glm(cbind(diarrhoea, duration - diarrhoea) ~ 1, binomial, a[[2]])))
+with_ci <- exp(confint(glm(cbind(diarrhoea, duration - diarrhoea) ~ 1, binomial, a[[2]])))
+plot(1:2, c(without, with), xlim = c(0, 3), ylim = c(0, .1), xlab = NA, ylab = "probability of diarrhoea", axes = FALSE, pch = 19)
+axis(2)
+arrows(1, without_ci[1], 1, without_ci[2], .1, 90, 3)
+arrows(2, with_ci[1], 2, with_ci[2], .1, 90, 3)
+text(1, 0, "no vaccine")
+text(2, 0, "vaccine")
+```
+
+## Another shot at the relationship between symptoms and vaccination
+
+```{r}
+fig1 <- readr::read_csv("Figure1.csv") %>% 
+  dplyr::select(-CODE) %>%
+  dplyr::mutate_if(is.numeric, as.integer) %>% 
+  dplyr::arrange(WEEKNO)
+```
+
+```{r}
+g <- function(vacc_name) {
+  fig1[, c("FlockID", "WEEKNO", vacc_name)] %>% 
+  unique() %>% 
+  split(.$FlockID)
+}
+```
+
+```{r}
+f <- function(df) {
+  vacc_names <- grep("vaccinated", names(df))
+  out <- setNames(data.frame(df$FlockID[1], seq_len(max(df$WEEKNO)), 0L, stringsAsFactors = FALSE), names(df))
+  first <- which(df[, vacc_names] > 0)[1]
+  if (is.na(first)) return(out)
+  out[first:nrow(out), vacc_names] <- 1L
+  out
+}
+```
+
+```{r}
+viparc <- readr::read_csv("https://raw.githubusercontent.com/viparc/clires_data/master/data/viparc.csv",
+                          col_types = paste(rep(c("c", "i", "l", "i", "d", "l", "d"), c(1, 2, 2, 1, 3, 6, 45)), collapse = "")) %>% 
+  dplyr::mutate(FlockID = paste0(farm, flock))
+```
+
+```{r}
+vacc_data <- names(fig1) %>%
+  setdiff(c("FlockID", "WEEKNO")) %>% 
+  lapply(g) %>% 
+  lapply(function(x) dplyr::bind_rows(lapply(x, f))) %>% 
+  purrr::reduce(dplyr::left_join, c("FlockID", "WEEKNO")) %>% 
+  dplyr::left_join(viparc, "FlockID") %>% 
+  dplyr::select(farm, flock, week, respiratory, diarrhoea, cns, sudden_death, ends_with("vaccinated")) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::ends_with("vaccinated")), as.logical)
+```
+
+Same result as before for the effects of AI and IBV vaccines:
+
+```{r}
+mod <- glm(respiratory ~ NDV.vaccinated + HPAI.vaccinated + IBV.vaccinated + IBD.vaccinated, binomial, vacc_data)
+summary(mod)
+car::Anova(mod, test = "LR")
+```
+
+Here, both HPAI and NDV vaccines are associated with higher CNS (whereas it was
+only the NDV vaccine in the analysis above):
+
+```{r}
+mod <- glm(cns ~ HPAI.vaccinated + NDV.vaccinated, binomial, vacc_data)
+summary(mod)
+car::Anova(mod, test = "LR")
+```
+
+Here HPAI vaccine is shown to protect against mortality, in addition to the PM
+vaccine. NDV vaccine now is marginally associtaed with increased risk:
+
+```{r}
+mod <- glm(sudden_death ~ NDV.vaccinated + HPAI.vaccinated + PM.vaccinated, binomial, vacc_data)
+summary(mod)
+car::Anova(mod, test = "LR")
+```
+
+Comparin with all the symptoms:
+
+```{r}
+mod1 <- glm(sudden_death ~ NDV.vaccinated + HPAI.vaccinated + PM.vaccinated, binomial, vacc_data)
+mod2 <- glm(sudden_death ~ NDV.vaccinated + HPAI.vaccinated + PM.vaccinated + IBV.vaccinated + IBD.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+summary(mod1)
+summary(mod2)
+car::Anova(mod1, test = "LR")
+car::Anova(mod2, test = "LR")
+```
+
+```{r}
+mod1 <- glm(cns ~ HPAI.vaccinated + NDV.vaccinated, binomial, vacc_data)
+mod2 <- glm(cns ~ HPAI.vaccinated + NDV.vaccinated + PM.vaccinated + IBV.vaccinated + IBD.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+summary(mod1)
+summary(mod2)
+car::Anova(mod1, test = "LR")
+car::Anova(mod2, test = "LR")
+```
+
+```{r}
+mod1 <- glm(respiratory ~ NDV.vaccinated + HPAI.vaccinated + IBV.vaccinated + IBD.vaccinated, binomial, vacc_data)
+mod2 <- glm(respiratory ~ NDV.vaccinated + HPAI.vaccinated + IBV.vaccinated + IBD.vaccinated + PM.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+summary(mod1)
+summary(mod2)
+car::Anova(mod1, test = "LR")
+car::Anova(mod2, test = "LR")
+```
+
+```{r}
+mod1 <- glm(diarrhoea ~ IBD.vaccinated, binomial, vacc_data)
+mod2 <- glm(diarrhoea ~ IBD.vaccinated + NDV.vaccinated + HPAI.vaccinated + IBV.vaccinated + PM.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+summary(mod1)
+summary(mod2)
+car::Anova(mod2, test = "LR")
+```
+
+## Link between vaccination status and presence of symptoms
+
+### Making the data
+
+Loading the ViParc data for the week and the symptoms information:
+
+```{r}
+viparc <- readr::read_csv("https://raw.githubusercontent.com/viparc/clires_data/master/data/viparc.csv",
+                          col_types = paste(rep(c("c", "i", "l", "i", "d", "l", "d"), c(1, 2, 2, 1, 3, 6, 45)), collapse = "")) %>% 
+  dplyr::mutate(FlockID = paste0(farm, flock))
+```
+
+Laoding the data on the timings of vaccination:
+
+```{r}
+fig1 <- readr::read_csv("Figure1.csv") %>% 
+  dplyr::select(-CODE) %>%
+  dplyr::mutate_if(is.numeric, as.integer) %>% 
+  dplyr::arrange(WEEKNO)
+```
+
+The following function splits the information on a given vaccine by flock:
+
+```{r}
+g <- function(vacc_name) {
+  fig1[, c("FlockID", "WEEKNO", vacc_name)] %>% 
+  unique() %>% 
+  split(.$FlockID)
+}
+```
+
+The following function recodes, for a data frame containing the vaccination
+information of a given flock, the vaccination information with `FALSE` for the
+weeks before vaccination and `TRUE` for the weeks after vaccination:
+
+```{r}
+f <- function(df) {
+  vacc_names <- grep("vaccinated", names(df))
+  out <- setNames(data.frame(df$FlockID[1], seq_len(max(df$WEEKNO)), 0L, stringsAsFactors = FALSE), names(df))
+  first <- which(df[, vacc_names] > 0)[1]
+  if (is.na(first)) return(out)
+  out[first:nrow(out), vacc_names] <- 1L
+  out
+}
+```
+
+Using the 2 datasets and the 2 functions defined above to generate the dataset
+for our analysis:
+
+```{r}
+(vacc_data <- names(fig1) %>%
+  setdiff(c("FlockID", "WEEKNO")) %>% 
+  lapply(g) %>% 
+  lapply(function(x) dplyr::bind_rows(lapply(x, f))) %>% 
+  purrr::reduce(dplyr::left_join, c("FlockID", "WEEKNO")) %>% 
+  dplyr::left_join(viparc, "FlockID") %>% 
+  dplyr::select(farm, flock, week, respiratory, diarrhoea, cns, sudden_death, ends_with("vaccinated")) %>% 
+  dplyr::mutate_at(dplyr::vars(dplyr::ends_with("vaccinated")), as.logical) %>% 
+  tibble::as_tibble())
+```
+
+Estimating logistic regressions, one for each of the 4 symptoms:
+
+```{r}
+vaccine_names <- grep("vaccinated", names(vacc_data), value = TRUE)
+symptoms <- c("respiratory", "sudden_death", "diarrhoea", "cns")
+models <- setNames(lapply(
+  paste(symptoms, "~", paste(c("week", vaccine_names), collapse = "+")),
+  function(x) glm(as.formula(x), binomial, vacc_data)), symptoms)
+```
+
+The summaries of the 4 models:
+
+```{r}
+lapply(models, summary)
+```
+
+The significativities of the effects for the 4 models:
+
+```{r}
+lapply(models, car::Anova, test = "LR")
+```
+
+The coefficients of the 4 models:
+
+```{r}
+(coeff <- sapply(models, coef))
+```
+
+The confidence intervals of the coefficients of the 4 models:
+
+```{r}
+(coeff_ci <- lapply(models, confint))
+```
+
+```{r}
+linkinv <- family(models[[1]])$linkinv
+```
+
+```{r}
+newdata <- data.frame(week = seq(min(vacc_data$week), max(vacc_data$week), le = 512),
+                      Fowl.Pox.vaccinated = FALSE, HPAI.vaccinated = FALSE,
+                      NDV.vaccinated = FALSE, IBV.vaccinated = FALSE,
+                      IBD.vaccinated = FALSE, PM.vaccinated = FALSE)
+```
+
+
+```{r}
+predict2 <- function(x) {
+  require(magrittr)
+  predict(x, newdata, se.fit = TRUE) %>% 
+    data.frame() %>% 
+    tibble::as_tibble() %>% 
+    dplyr::mutate(lower = linkinv(fit + qt(.025, Inf) * se.fit),
+                  upper = linkinv(fit + qt(.975, Inf) * se.fit),
+                  fit   = linkinv(fit)) %>% 
+    dplyr::select(-residual.scale, -se.fit)
+}
+```
+
+```{r}
+predictions <- lapply(models, predict2)
+```
+
+```{r}
+leg <- names(predictions) %>% 
+  sub("_", " ", .) %>% 
+  sub("cns", "CNS infections", .) %>% 
+  sub("y", "y infections", .)
+```
+
+
+```{r}
+cols <- c("#e41a1c", "#377eb8", "#4daf4a", "#984ea3")
+fills <- adjustcolor(cols, .2)
+x <- newdata$week
+x_val <- c(x, rev(x))
+plot(x, predictions[[1]]$fit, ylim = c(0,.17), type = "n", xlab = "age (weeks)",
+     ylab = "average prevalence")
+for (i in seq_along(predictions)) {
+  polygon(x_val, c(predictions[[i]]$lower, rev(predictions[[i]]$upper)), 
+          col = fills[i], border = NA)
+  lines(x, predictions[[i]]$fit, col = cols[i])
+}
+legend("topright", legend = leg, fill = fills, col = cols, lty = 1, bty = "n", border = NA)
+```
+
+```{r fig.height = 2, fig.width = 10}
+xs <- 1:6
+ys <- c(1 / seq(0, 10, 1), 1 + seq(0, 10, 1))
+f <- function(x) log2(exp(x))
+
+opar <- par(mfrow = c(1, 4), plt = c(.2, 1, .05, .95))
+
+for (i in seq_along(coeff_ci)) {
+  plot(xs, f(coeff[-(1:2), i]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1),
+       axes = FALSE, xlab = NA, ylab = "odds ratio")
+  axis(2, log2(ys), ys)
+  text(3.5, 2.5, leg[i])
+  text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+  arrows(xs, f(coeff_ci[[i]][-(1:2), 1]), xs, f(coeff_ci[[i]][-(1:2), 2]), .05, 90, 3)
+  abline(h = 0, lty = 2)
+}
+
+par(opar)
+```
+
+
+
+
+```{r}
+mod <- glm(as.formula(paste(symptoms[1], "~", paste(c("week", vaccine_names), collapse = "+"))), binomial, vacc_data)
+
+mod <- lapply(symptoms[1], function(x) glm(as.formula(paste(x, "~", paste(c("week", vaccine_names), collapse = "+"))), binomial, vacc_data))
+
+formula(mod)
+```
+
+
+
+```{r}
+mod1 <- glm(respiratory ~ week + NDV.vaccinated + HPAI.vaccinated + PM.vaccinated + IBV.vaccinated + IBD.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+mod2 <- glm(sudden_death ~ week + NDV.vaccinated + HPAI.vaccinated + PM.vaccinated + IBV.vaccinated + IBD.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+mod3 <- glm(diarrhoea ~ week + NDV.vaccinated + HPAI.vaccinated + PM.vaccinated + IBV.vaccinated + IBD.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+mod4 <- glm(cns ~ week + NDV.vaccinated + HPAI.vaccinated + PM.vaccinated + IBV.vaccinated + IBD.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+```
+
+```{r}
+mod1 <- glm(respiratory ~ week + NDV.vaccinated + HPAI.vaccinated + PM.vaccinated + IBV.vaccinated + IBD.vaccinated + Fowl.Pox.vaccinated, binomial, vacc_data)
+summary(mod1)
+car::Anova(mod1, test = "LR")
+```
+
+
+```{r}
+ct1 <- coef(mod1)
+ct2 <- coef(mod2)
+ct3 <- coef(mod3)
+ct4 <- coef(mod4)
+ci1 <- confint(mod1)
+ci2 <- confint(mod2)
+ci3 <- confint(mod3)
+ci4 <- confint(mod4)
+```
+
+```{r}
+xs <- 1:6
+ys <- c(1 / seq(0, 10, 1), 1 + seq(0, 10, 1))
+f <- function(x) log2(exp(x))
+plot(xs, f(ct1[-1]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1), axes = FALSE, xlab = NA, ylab = "odds ratio")
+axis(2, log2(ys), ys)
+text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+arrows(xs, f(ci1[-1, 1]), xs, f(ci1[-1, 2]), .1, 90, 3)
+abline(h = 0, lty = 2)
+```
+
+```{r}
+xs <- 1:6
+ys <- c(1 / seq(0, 10, 1), 1 + seq(0, 10, 1))
+f <- function(x) log2(exp(x))
+plot(xs, f(ct2[-1]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1), axes = FALSE, xlab = NA, ylab = "odds ratio")
+axis(2, log2(ys), ys)
+text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+arrows(xs, f(ci2[-1, 1]), xs, f(ci2[-1, 2]), .1, 90, 3)
+abline(h = 0, lty = 2)
+```
+
+```{r}
+xs <- 1:6
+ys <- c(1 / seq(0, 10, 1), 1 + seq(0, 10, 1))
+f <- function(x) log2(exp(x))
+plot(xs, f(ct3[-1]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1), axes = FALSE, xlab = NA, ylab = "odds ratio")
+axis(2, log2(ys), ys)
+text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+arrows(xs, f(ci3[-1, 1]), xs, f(ci3[-1, 2]), .1, 90, 3)
+abline(h = 0, lty = 2)
+```
+
+```{r}
+xs <- 1:6
+ys <- c(1 / seq(0, 10, 1), 1 + seq(0, 10, 1))
+f <- function(x) log2(exp(x))
+plot(xs, f(ct4[-1]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1), axes = FALSE, xlab = NA, ylab = "odds ratio")
+axis(2, log2(ys), ys)
+text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+arrows(xs, f(ci4[-1, 1]), xs, f(ci4[-1, 2]), .1, 90, 3)
+abline(h = 0, lty = 2)
+```
+
+
+
+
+
+```{r fig.height = 2, fig.width = 10}
+xs <- 1:6
+ys <- c(1 / seq(0, 10, 1), 1 + seq(0, 10, 1))
+f <- function(x) log2(exp(x))
+
+opar <- par(mfrow = c(1, 4), plt = c(.2, 1, .05, .95))
+
+plot(xs, f(ct1[-1]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1), axes = FALSE, xlab = NA, ylab = "odds ratio")
+axis(2, log2(ys), ys)
+text(3.5, 2.5, "respiratory infections")
+text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+arrows(xs, f(ci1[-1, 1]), xs, f(ci1[-1, 2]), .05, 90, 3)
+abline(h = 0, lty = 2)
+
+plot(xs, f(ct2[-1]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1), axes = FALSE, xlab = NA, ylab = "odds ratio")
+axis(2, log2(ys), ys)
+text(3.5, 2.5, "sudden death")
+text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+arrows(xs, f(ci2[-1, 1]), xs, f(ci2[-1, 2]), .05, 90, 3)
+abline(h = 0, lty = 2)
+
+plot(xs, f(ct3[-1]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1), axes = FALSE, xlab = NA, ylab = "odds ratio")
+axis(2, log2(ys), ys)
+text(3.5, 2.5, "diarrhoea")
+text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+arrows(xs, f(ci3[-1, 1]), xs, f(ci3[-1, 2]), .05, 90, 3)
+abline(h = 0, lty = 2)
+
+plot(xs, f(ct4[-1]), pch = 19, xlim = c(0, 7), ylim = c(-3.1, 3.1), axes = FALSE, xlab = NA, ylab = "odds ratio")
+axis(2, log2(ys), ys)
+text(3.5, 2.5, "CNS")
+text(xs, -2.5, c("NDV", "HPAI", "PM", "IBV", "IBD", "FP"))
+arrows(xs, f(ci4[-1, 1]), xs, f(ci4[-1, 2]), .05, 90, 3)
+abline(h = 0, lty = 2)
+
+par(opar)
+```
+
+```{r}
+xs <- 1:4
+plot(xs, exp(c(ct1[1], ct2[1], ct3[1], ct4[1])), pch = 19, xlim = c(0, 5), ylim = c(0, .1), axes = FALSE, xlab = NA, ylab = "probability of occurence")
+axis(2)
+text(xs, .05, c("resp.", "death", "diarrhoea", "CNS"))
+arrows(xs, exp(c(ci1[1, 1], ci2[1, 1], ci3[1, 1], ci4[1, 1])), xs, exp(c(ci1[1, 2], ci2[1, 2], ci3[1, 2], ci4[1, 2])), .1, 90, 3)
+```
+

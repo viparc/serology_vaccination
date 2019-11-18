@@ -6,3 +6,5 @@
 *docx
 *pptx
 .DS_Store
+*xlsx
+*_cache/*

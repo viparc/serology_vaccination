@@ -94,7 +94,7 @@ decreasing them! Furthermore, other vaccines that are not supposed to have any
 effect on some symptoms do significantly increase and decrease them. This
 suggests either that the correspondance between the symptoms and the pathogens
 that are targeted by the vaccines is way too loose in this system or that there
-are other  factors at play that we didn't take into account into our analysis
+are other factors at play that we didn't take into account into our analysis
 (e.g. AMU). The summary of the effects is detailed below:
 
 * **respiratory infections:** NDV and IBD significantly decrease the prevalence

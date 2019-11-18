@@ -8,3 +8,4 @@
 .DS_Store
 *xlsx
 *_cache/*
+*_files/*
